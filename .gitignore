@@ -1,0 +1,19 @@
+# Build outputs
+Debug/
+Release/
+build/
+
+# STM32CubeIDE / Eclipse settings
+.settings/
+.metadata/
+
+# Launch / local run configs
+*.launch
+
+# Temporary / logs
+*.log
+*.tmp
+
+# OS files
+.DS_Store
+Thumbs.db
