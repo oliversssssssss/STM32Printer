@@ -1,0 +1,10 @@
+../Core/Src/app/print_buffer.c:36:16:print_buffer_lock	4
+../Core/Src/app/print_buffer.c:46:13:print_buffer_unlock	3
+../Core/Src/app/print_buffer.c:53:6:print_buffer_bind_mutex	1
+../Core/Src/app/print_buffer.c:58:6:print_buffer_init	1
+../Core/Src/app/print_buffer.c:63:6:print_buffer_clear	2
+../Core/Src/app/print_buffer.c:75:9:print_buffer_append_text	5
+../Core/Src/app/print_buffer.c:103:13:print_buffer_get_data	1
+../Core/Src/app/print_buffer.c:108:10:print_buffer_get_length	2
+../Core/Src/app/print_buffer.c:122:9:print_buffer_is_empty	3
+../Core/Src/app/print_buffer.c:136:10:print_buffer_take_snapshot_and_clear	6

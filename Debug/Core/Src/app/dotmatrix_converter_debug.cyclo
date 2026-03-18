@@ -1,0 +1,9 @@
+../Core/Src/app/dotmatrix_converter_debug.c:47:13:normalize_printable_char	3
+../Core/Src/app/dotmatrix_converter_debug.c:63:13:normalize_debug_display_char	3
+../Core/Src/app/dotmatrix_converter_debug.c:75:23:get_font_char_ptr	1
+../Core/Src/app/dotmatrix_converter_debug.c:83:13:load_font_bits_16x16	2
+../Core/Src/app/dotmatrix_converter_debug.c:93:13:dilate_font_bits_16x16	13
+../Core/Src/app/dotmatrix_converter_debug.c:126:13:fill_zero_row	2
+../Core/Src/app/dotmatrix_converter_debug.c:135:13:write_char_bits_to_row	5
+../Core/Src/app/dotmatrix_converter_debug.c:154:6:dm_print_string_debug	14
+../Core/Src/app/dotmatrix_converter_debug.c:238:6:dm_print_string_with_settings	31

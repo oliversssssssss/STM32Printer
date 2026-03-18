@@ -1,0 +1,5 @@
+../Core/Src/app/app_printer.c:13:6:app_printer_process_rx	1
+../Core/Src/app/app_printer.c:19:6:app_printer_process_print	1
+../Core/Src/app/app_printer.c:25:6:app_printer_wait_print_task	1
+../Core/Src/app/app_printer.c:32:6:app_printer_init	1
+../Core/Src/app/app_printer.c:43:6:app_printer_process	1
