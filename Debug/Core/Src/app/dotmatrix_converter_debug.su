@@ -5,5 +5,5 @@
 ../Core/Src/app/dotmatrix_converter_debug.c:93:13:dilate_font_bits_16x16	56	static
 ../Core/Src/app/dotmatrix_converter_debug.c:126:13:fill_zero_row	24	static
 ../Core/Src/app/dotmatrix_converter_debug.c:135:13:write_char_bits_to_row	32	static
-../Core/Src/app/dotmatrix_converter_debug.c:154:6:dm_print_string_debug	1768	static
-../Core/Src/app/dotmatrix_converter_debug.c:238:6:dm_print_string_with_settings	2592	static
+../Core/Src/app/dotmatrix_converter_debug.c:154:6:dm_print_string_debug	1792	static
+../Core/Src/app/dotmatrix_converter_debug.c:238:6:dm_print_string_with_settings	2616	static

@@ -31,7 +31,7 @@
 #define CHAR_HEIGHT_PIXELS  16
 
 /* 保留 1 列字符间隔，便于 Python 渲染时更清楚 */
-#define CHAR_SPACING_PIXELS 1
+#define CHAR_SPACING_PIXELS 2
 #define FRAME_CHAR_WIDTH    (CHAR_WIDTH_PIXELS + CHAR_SPACING_PIXELS)
 
 #define BYTES_PER_CHAR      (CHAR_WIDTH_PIXELS * CHAR_HEIGHT_PIXELS / 8)  /* 32 bytes */

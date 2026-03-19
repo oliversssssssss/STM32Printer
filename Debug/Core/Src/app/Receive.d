@@ -1,5 +1,5 @@
 Core/Src/app/Receive.o: ../Core/Src/app/Receive.c \
- ../Core/Inc/app/Receive.h ../Core/Inc/usart.h ../Core/Inc/main.h \
+ ../Core/Inc/app/Receive.h ../Core/Inc/main.h \
  ../Drivers/STM32U5xx_HAL_Driver/Inc/stm32u5xx_hal.h \
  ../Core/Inc/stm32u5xx_hal_conf.h \
  ../Drivers/STM32U5xx_HAL_Driver/Inc/stm32u5xx_hal_rcc.h \
@@ -28,13 +28,12 @@ Core/Src/app/Receive.o: ../Core/Src/app/Receive.c \
  ../Drivers/STM32U5xx_HAL_Driver/Inc/stm32u5xx_hal_uart.h \
  ../Drivers/STM32U5xx_HAL_Driver/Inc/stm32u5xx_hal_uart_ex.h \
  ../Drivers/STM32U5xx_HAL_Driver/Inc/stm32u5xx_hal_exti.h \
- ../Core/Inc/log/myprintf.h \
+ ../Core/Inc/usart.h ../Core/Inc/main.h ../Core/Inc/log/myprintf.h \
  ../Middlewares/Third_Party/CMSIS/RTOS2/Include/cmsis_os2.h \
  ../Core/Inc/app/dotmatrix_converter_debug.h \
  ../Core/Inc/app/print_settings.h ../Core/Inc/app/escpos_commands.h \
  ../Core/Inc/app/print_buffer.h
 ../Core/Inc/app/Receive.h:
-../Core/Inc/usart.h:
 ../Core/Inc/main.h:
 ../Drivers/STM32U5xx_HAL_Driver/Inc/stm32u5xx_hal.h:
 ../Core/Inc/stm32u5xx_hal_conf.h:
@@ -64,6 +63,8 @@ Core/Src/app/Receive.o: ../Core/Src/app/Receive.c \
 ../Drivers/STM32U5xx_HAL_Driver/Inc/stm32u5xx_hal_uart.h:
 ../Drivers/STM32U5xx_HAL_Driver/Inc/stm32u5xx_hal_uart_ex.h:
 ../Drivers/STM32U5xx_HAL_Driver/Inc/stm32u5xx_hal_exti.h:
+../Core/Inc/usart.h:
+../Core/Inc/main.h:
 ../Core/Inc/log/myprintf.h:
 ../Middlewares/Third_Party/CMSIS/RTOS2/Include/cmsis_os2.h:
 ../Core/Inc/app/dotmatrix_converter_debug.h:

@@ -176,10 +176,32 @@ static void printer_settings_set_scale(uint8_t scale)
     settings_unlock();
 }
 
+static void printer_clear_pending_execute_requests(void)
+{
+    /* 旧裸标志路径 */
+    printer_execute_request = 0U;
+
+    /* RTOS 优先路径：清空累计的打印请求信号量 */
+    if ((g_print_semaphore != NULL) && (osKernelGetState() == osKernelRunning)) {
+        while (osSemaphoreAcquire(g_print_semaphore, 0U) == osOK) {
+            /* drain */
+        }
+    }
+
+    /* 兼容路径说明：
+     * CMSIS-RTOS2 的 osThreadFlagsClear() 仅允许清除当前线程标志，
+     * 不能在这里直接跨线程清掉 PrintTask 的待处理标志。
+     * 当前正式 RTOS 主链已优先使用计数信号量，因此这里先清理：
+     * 1) 旧裸标志位
+     * 2) 信号量中累计的待处理请求
+     * 若未来回退到“仅任务标志”模式，再单独补对应清理策略。
+     */
+}
+
 static void printer_reset_to_default(void)
 {
     printer_clear_text_buffer("ESC @ reset");
-    printer_execute_request = 0U;
+    printer_clear_pending_execute_requests();
 
     if (!settings_lock(100)) {
         return;
@@ -254,7 +276,10 @@ void printer_request_execute(void)
 {
     /* RTOS 优先路径：如果已经绑定了打印信号量，则用计数信号量排队打印请求 */
     if (g_print_semaphore != NULL) {
-        (void)osSemaphoreRelease(g_print_semaphore);
+        osStatus_t status = osSemaphoreRelease(g_print_semaphore);
+        if (status != osOK) {
+            log_error("print request dropped: semaphore queue full\r\n");
+        }
         return;
     }
 
@@ -294,6 +319,15 @@ void printer_execute_buffer(void)
 
     uint16_t copied_len = print_buffer_take_snapshot_and_clear(g_print_snapshot, sizeof(g_print_snapshot));
 
+    log_info("SNAP len=%d, text=[%s]\r\n", copied_len, g_print_snapshot);
+
+    log_printf("[SNAP HEX] ");
+    for (uint16_t i = 0; i < copied_len; i++) {
+        log_printf("%02X ", (unsigned char)g_print_snapshot[i]);
+    }
+    log_printf("\r\n");
+
+
     if (copied_len == 0U) {
         log_error("print_buffer is empty\r\n");
         return;
@@ -313,7 +347,9 @@ void printer_execute_buffer(void)
      * - scale
      * 都将真正参与打印
      */
-    dm_print_string_with_settings(g_print_snapshot, &settings_snapshot);
+//    dm_print_string_with_settings(g_print_snapshot, &settings_snapshot);
+
+    dm_print_string_debug(g_print_snapshot);
 }
 
 /* 兼容保留：旧轮询路径 */
@@ -425,7 +461,7 @@ void handle_escpos_command(uint8_t *cmd, uint8_t len)
     /* ESC 3 n -> 行间距 */
     if (len >= 3U && cmd[1] == '3') {
         printer_settings_set_line_spacing(cmd[2]);
-        log_info("The line spacing is set to %d\r\n", settings.line_spacing);
+        log_info("The line spacing is set to %d\r\n", cmd[2]);
         return;
     }
 
@@ -436,21 +472,28 @@ void handle_escpos_command(uint8_t *cmd, uint8_t len)
     /* ESC L n -> 当前 demo 自定义为左边距 */
     if (len >= 3U && cmd[1] == 0x4C) {
         printer_settings_set_margin_left(cmd[2]);
-        log_info("The left margin is set to %d\r\n", settings.margin_left);
+        log_info("The left margin is set to %d\r\n", cmd[2]);
         return;
     }
 
     /* ESC r n -> 当前 demo 自定义为右边距 */
     if (len >= 3U && cmd[1] == 'r') {
         printer_settings_set_margin_right(cmd[2]);
-        log_info("The right margin is set to %d\r\n", settings.margin_right);
+        log_info("The right margin is set to %d\r\n", cmd[2]);
         return;
     }
 
     /* ESC E n -> 当前 demo 自定义为放大倍数 */
     if (len >= 3U && cmd[1] == 0x45) {
-        printer_settings_set_scale(cmd[2]);
-        log_info("The magnification is set to %d\r\n", settings.scale);
+        uint8_t scale = cmd[2];
+        if (scale < 1U) {
+            scale = 1U;
+        }
+        if (scale > 3U) {
+            scale = 3U;
+        }
+        printer_settings_set_scale(scale);
+        log_info("The magnification is set to %d\r\n", scale);
         return;
     }
 

@@ -1,5 +1,10 @@
-../Core/Src/app/Receive.c:68:17:GetBufferLength	4	static
-../Core/Src/app/Receive.c:79:16:is_command_frame	16	static
-../Core/Src/app/Receive.c:111:13:handle_text_data	24	static
-../Core/Src/app/Receive.c:134:6:HAL_UART_RxCpltCallback	24	static
-../Core/Src/app/Receive.c:161:6:uart_GetDate	16	static
+../Core/Src/app/Receive.c:96:17:ring_used_length	4	static
+../Core/Src/app/Receive.c:101:17:ring_free_length	8	static
+../Core/Src/app/Receive.c:119:16:is_command_frame	16	static
+../Core/Src/app/Receive.c:138:13:handle_text_data	40	static
+../Core/Src/app/Receive.c:168:13:uart_rx_restart_idle	8	static
+../Core/Src/app/Receive.c:179:6:uart_rx_start	8	static
+../Core/Src/app/Receive.c:224:6:HAL_UARTEx_RxEventCallback	24	static
+../Core/Src/app/Receive.c:258:6:HAL_UART_RxCpltCallback	16	static
+../Core/Src/app/Receive.c:268:6:HAL_UART_ErrorCallback	16	static
+../Core/Src/app/Receive.c:281:6:uart_GetDate	24	static,ignoring_inline_asm

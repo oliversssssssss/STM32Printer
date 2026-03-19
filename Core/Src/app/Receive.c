@@ -7,74 +7,114 @@
 #include "escpos_commands.h"
 #include "print_buffer.h"
 
-// 接收环形缓冲大小
-#define BUFFER_SIZE 4096
+/* =========================================================
+ * Receive.c
+ *
+ * 当前接收链采用方案 B：UART1 ReceiveToIdle
+ *
+ * 主链说明：
+ * 1. uart_rx_start()
+ *    -> 调用 HAL_UARTEx_ReceiveToIdle_IT(...)
+ *    -> 启动一段式接收
+ *
+ * 2. HAL_UARTEx_RxEventCallback(...)
+ *    -> 串口一段数据接收完成并进入空闲时触发
+ *    -> ISR 仅负责：
+ *       - 把这一段数据写入 rx_ring
+ *       - 把“这一段长度”压入帧长度队列
+ *       - 重新启动下一轮 ReceiveToIdle
+ *
+ * 3. uart_GetDate()
+ *    -> 当前由 RxProcessTask 周期调用
+ *    -> 从帧长度队列中精确取出一帧
+ *    -> 再分流到：
+ *       - 文本帧 -> handle_text_data(...)
+ *       - 命令帧 -> handle_escpos_command(...)
+ *
+ * 当前已不再采用旧的：
+ * - 单字节 HAL_UART_Receive_IT(..., 1)
+ * - 50ms 空闲超时猜一帧
+ * 作为正式主接收路径。
+ *
+ * 兼容说明：
+ * - HAL_UART_RxCpltCallback(...) 仍保留空壳，以避免旧引用报错
+ * - rx_byte 仍保留定义，以避免头文件依赖断裂
+ * ========================================================= */
 
-// 串口空闲超过该时间，认为一帧结束
-#define FRAME_IDLE_TIMEOUT_MS 50U
+/* ========================= 参数配置 ========================= */
 
-/* ========================= 状态归属说明 =========================
- *
- * 【ISR 共享状态组】
- * 下面这几个对象由“USART1 中断回调”和“主循环中的接收处理逻辑”共同参与：
- *
- * 1. rx_ring
- *    - ISR 写入：HAL_UART_RxCpltCallback()
- *    - 主循环读取：uart_GetDate()
- *    - 角色：字节流环形缓冲
- *
- * 2. writeIndex
- *    - ISR 写入
- *    - 主循环读取
- *    - 角色：环形缓冲写指针
- *
- * 3. readIndex
- *    - 主循环写入/读取
- *    - ISR 不直接改它
- *    - 但它与 writeIndex / rx_ring 一起构成 ISR-任务共享边界
- *
- * 4. rx_tick
- *    - ISR 更新时间戳
- *    - 主循环读取，用于空闲超时判帧
- *
- * 5. rx_byte
- *    - 当前单字节接收暂存变量
- *    - 中断接收链核心参与对象
- *
- * 未来 FreeRTOS 视角：
- * - 这一组状态应视为“ISR shared”
- * - 未来若迁移 RTOS，应优先考虑：
- *   1) 保持 ISR 只负责写入
- *   2) 任务侧统一消费
- *   3) 再进一步才考虑 stream buffer / queue / 临界区保护
- * ============================================================ */
+#define BUFFER_SIZE              4096
+#define RX_IDLE_CHUNK_SIZE       128
+#define RX_FRAME_QUEUE_SIZE      16
 
-/* ISR shared：主循环消费读指针 */
-static uint16_t readIndex = 0;
+/* ========================= 接收状态 ========================= */
 
-/* ISR shared：中断写入写指针，主循环读取它判断缓冲长度 */
-static uint16_t writeIndex = 0;
-
-/* ISR shared：字节流环形缓冲，中断写、主循环读 */
+/* 环形缓冲：ISR 写，任务读 */
 static uint8_t rx_ring[BUFFER_SIZE];
 
-/* ISR shared：单字节接收临时变量 */
-uint8_t rx_byte;
+/* ISR / 任务共享索引 */
+static volatile uint16_t readIndex  = 0U;
+static volatile uint16_t writeIndex = 0U;
 
-/* ISR shared：最近一次接收到字节的时刻，中断更新，主循环读取 */
-static uint32_t rx_tick;
+/* 兼容保留：旧单字节接收临时变量
+ * 方案 B 下不再是主路径核心变量，仅保留定义避免旧引用出错。
+ */
+uint8_t rx_byte = 0U;
 
-// 获取环形缓冲里未读数据长度
-static uint16_t GetBufferLength(void)
+/* 最近一次接收完成的时间戳（当前主要作为调试观测使用） */
+static volatile uint32_t rx_tick = 0U;
+
+/* ReceiveToIdle 一段接收缓冲 */
+static uint8_t rx_idle_chunk[RX_IDLE_CHUNK_SIZE];
+
+/* 帧长度队列
+ * ISR 把每一段接收的 Size 入队
+ * 任务侧按队列长度精确取帧
+ */
+static volatile uint16_t rx_frame_len_queue[RX_FRAME_QUEUE_SIZE];
+static volatile uint8_t  rx_frame_q_head  = 0U;
+static volatile uint8_t  rx_frame_q_tail  = 0U;
+static volatile uint8_t  rx_frame_q_count = 0U;
+
+/* ========================= 可观测统计 ========================= */
+
+/* 环形缓冲溢出：这一段放不下 */
+static volatile uint32_t rx_ring_overflow_count   = 0U;
+static volatile uint8_t  rx_ring_overflow_pending = 0U;
+
+/* 帧长度队列溢出：队列满了，新的帧长度无法入队 */
+static volatile uint32_t rx_frame_queue_overflow_count   = 0U;
+static volatile uint8_t  rx_frame_queue_overflow_pending = 0U;
+
+/* UART 错误统计 */
+static volatile uint32_t uart_error_count     = 0U;
+static volatile uint32_t uart_error_code_last = 0U;
+static volatile uint8_t  uart_error_pending   = 0U;
+
+/* ========================= 内部辅助函数 ========================= */
+
+static uint16_t ring_used_length(void)
 {
-    return (writeIndex + BUFFER_SIZE - readIndex) % BUFFER_SIZE;
+    return (uint16_t)((writeIndex + BUFFER_SIZE - readIndex) % BUFFER_SIZE);
 }
 
-/* 判断当前一帧是否应按“命令帧”处理
- * 当前规则：
+static uint16_t ring_free_length(void)
+{
+    /* 预留 1 字节区分“满”和“空” */
+    return (uint16_t)((BUFFER_SIZE - 1U) - ring_used_length());
+}
+
+/* 当前规则：
  * 1. ESC 开头 -> 命令帧
- * 2. 0x0A 开头 -> demo 简化触发命令帧
- * 3. 0x0C 开头 -> demo 简化触发命令帧
+ * 2. demo 简化触发命令：仅严格接受 0A 00 / 0C 00
+ *
+ * 注意：
+ * 当前仍然是“整帧二选一”模型：
+ * - 整帧要么按命令处理
+ * - 整帧要么按文本处理
+ *
+ * 这意味着：
+ * 目前还不是“标准 ESC/POS 混合流 parser”。
  */
 static uint8_t is_command_frame(const uint8_t *frame, uint16_t len)
 {
@@ -86,28 +126,15 @@ static uint8_t is_command_frame(const uint8_t *frame, uint16_t len)
         return 1U;
     }
 
-    if (frame[0] == 0x0A) {
-        return 1U;
-    }
-
-    if (frame[0] == 0x0C) {
-        return 1U;
+    if (len == 2U && frame[1] == 0x00U) {
+        if (frame[0] == 0x0AU || frame[0] == 0x0CU) {
+            return 1U;
+        }
     }
 
     return 0U;
 }
 
-/* 文本数据处理
- *
- * 【任务共享边界说明】
- * 文本帧一旦进入这里，就不再属于 ISR 共享状态组，
- * 而是转入 print_buffer 模块管理。
- *
- * 也就是说：
- * - Receive.c 只负责“把文本送进缓冲”
- * - 不拥有 print_buffer 的底层存储
- * - 不直接改 print_buf_len
- */
 static void handle_text_data(uint8_t *data, uint16_t len)
 {
     while (len > 0U && (data[len - 1U] == '\r' || data[len - 1U] == '\n')) {
@@ -121,71 +148,205 @@ static void handle_text_data(uint8_t *data, uint16_t len)
     log_info("识别到指令txt\r\n");
 
     if (print_buffer_append_text(data, len)) {
-        log_info("缓冲区已存入 %d 字节，总长 %d\r\n", len, print_buffer_get_length());
+        log_info("TXT len=%d, total=%d, data=[%.*s]\r\n",
+                 len,
+                 print_buffer_get_length(),
+                 len,
+                 data);
+
+        log_printf("[TXT HEX] ");
+        for (uint16_t i = 0; i < len; i++) {
+            log_printf("%02X ", data[i]);
+        }
+        log_printf("\r\n");
     } else {
         log_error("缓冲区溢出，丢弃数据\r\n");
     }
-
-    // 如需直接观察文本，可打开：
-    // dm_print_string_debug((char *)data);
 }
 
-// UART 中断回调：单字节接收写入环形缓冲
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+/* 重新启动下一轮 ReceiveToIdle */
+static void uart_rx_restart_idle(void)
 {
-    if (huart->Instance == USART1) {
-        uint16_t next = (uint16_t)((writeIndex + 1U) % BUFFER_SIZE);
-
-        if (next != readIndex) {
-            rx_ring[writeIndex] = rx_byte;
-            writeIndex = next;
-            rx_tick = HAL_GetTick();
-        }
-
-        HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
+    if (HAL_UARTEx_ReceiveToIdle_IT(&huart1, rx_idle_chunk, RX_IDLE_CHUNK_SIZE) != HAL_OK) {
+        uart_error_count++;
+        uart_error_pending = 1U;
+        uart_error_code_last = 0xFFFFFFFFU;
     }
 }
 
-/* 数据解析函数：超时组帧 -> 文本 / 命令分发
+/* ========================= 对外接口 ========================= */
+
+void uart_rx_start(void)
+{
+    readIndex = 0U;
+    writeIndex = 0U;
+    rx_tick = 0U;
+
+    rx_frame_q_head  = 0U;
+    rx_frame_q_tail  = 0U;
+    rx_frame_q_count = 0U;
+
+    rx_ring_overflow_count = 0U;
+    rx_ring_overflow_pending = 0U;
+
+    rx_frame_queue_overflow_count = 0U;
+    rx_frame_queue_overflow_pending = 0U;
+
+    uart_error_count = 0U;
+    uart_error_code_last = 0U;
+    uart_error_pending = 0U;
+
+    memset(rx_ring, 0, sizeof(rx_ring));
+    memset(rx_idle_chunk, 0, sizeof(rx_idle_chunk));
+
+    uart_rx_restart_idle();
+}
+
+/* ========================= HAL 回调 ========================= */
+
+/* 方案 B 主回调：
+ * 一段数据接收完成，并且 UART 进入空闲时触发。
  *
- * 当前角色：
- * - 它属于“接收处理子流程”的主体
- * - 从 ISR shared 状态组中取出一帧
- * - 再把帧分发到：
- *   1) 文本缓冲（任务共享）
- *   2) 命令处理（配置/事件共享）
+ * ISR 只做最小工作：
+ * 1. 记录时间
+ * 2. 检查队列容量
+ * 3. 检查 ring 空间
+ * 4. 整段写入 rx_ring
+ * 5. 把帧长度 Size 入队
+ * 6. 重启下一轮 ReceiveToIdle
  *
- * 未来 FreeRTOS 视角：
- * - 这里是最自然的“接收处理任务”主体逻辑入口
+ * 不在 ISR 中做：
+ * - 文本处理
+ * - 命令解析
+ * - 打印触发
+ * - 复杂日志
  */
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
+{
+    if (huart->Instance == USART1) {
+        rx_tick = HAL_GetTick();
+
+        if (Size > 0U) {
+            if (rx_frame_q_count >= RX_FRAME_QUEUE_SIZE) {
+                rx_frame_queue_overflow_count++;
+                rx_frame_queue_overflow_pending = 1U;
+            }
+            else if (Size > ring_free_length()) {
+                rx_ring_overflow_count++;
+                rx_ring_overflow_pending = 1U;
+            }
+            else {
+                for (uint16_t i = 0; i < Size; i++) {
+                    rx_ring[writeIndex] = rx_idle_chunk[i];
+                    writeIndex = (uint16_t)((writeIndex + 1U) % BUFFER_SIZE);
+                }
+
+                rx_frame_len_queue[rx_frame_q_tail] = Size;
+                rx_frame_q_tail = (uint8_t)((rx_frame_q_tail + 1U) % RX_FRAME_QUEUE_SIZE);
+                rx_frame_q_count++;
+            }
+        }
+
+        uart_rx_restart_idle();
+    }
+}
+
+/* 兼容保留：
+ * 当前方案 B 已不再使用单字节接收完成回调作为主路径。
+ * 保留此空实现仅为了避免旧工程符号依赖报错。
+ */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    (void)huart;
+}
+
+/* UART 错误回调：
+ * - 记录错误
+ * - 任务侧统一做可观测输出
+ * - 尝试恢复接收链
+ */
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART1) {
+        uart_error_count++;
+        uart_error_code_last = huart->ErrorCode;
+        uart_error_pending = 1U;
+
+        uart_rx_restart_idle();
+    }
+}
+
+/* ========================= 任务侧处理 ========================= */
+
 void uart_GetDate(void)
 {
-    uint32_t now = HAL_GetTick();
-    uint16_t len = GetBufferLength();
+    static char frame[BUFFER_SIZE + 1U];
 
-    // 串口空闲一段时间后，判定一帧完成
-    if (len > 0U && ((now - rx_tick) > FRAME_IDLE_TIMEOUT_MS)) {
-        static char frame[BUFFER_SIZE];
+    /* 任务侧统一输出可观测错误 */
+    if (uart_error_pending != 0U) {
+        uart_error_pending = 0U;
+        log_error("UART1 error count=%lu, last=0x%08lX\r\n",
+                  (unsigned long)uart_error_count,
+                  (unsigned long)uart_error_code_last);
+    }
 
-        uint16_t copy_len = (readIndex + len <= BUFFER_SIZE) ? len : (BUFFER_SIZE - readIndex);
-        memcpy(frame, &rx_ring[readIndex], copy_len);
+    if (rx_ring_overflow_pending != 0U) {
+        rx_ring_overflow_pending = 0U;
+        log_error("UART1 rx_ring overflow, dropped frames=%lu\r\n",
+                  (unsigned long)rx_ring_overflow_count);
+    }
 
-        if (copy_len < len) {
-            memcpy(frame + copy_len, rx_ring, len - copy_len);
-        }
+    if (rx_frame_queue_overflow_pending != 0U) {
+        rx_frame_queue_overflow_pending = 0U;
+        log_error("UART1 frame queue overflow, dropped frames=%lu\r\n",
+                  (unsigned long)rx_frame_queue_overflow_count);
+    }
 
-        frame[len] = '\0';
+    /* 没有完整帧待处理，直接返回 */
+    if (rx_frame_q_count == 0U) {
+        return;
+    }
 
-        // 命令帧
-        if (is_command_frame((const uint8_t *)frame, len)) {
-            handle_escpos_command((uint8_t *)frame, len);
-        }
-        // 普通文本帧
-        else {
-            handle_text_data((uint8_t *)frame, len);
-        }
+    /* 从帧长度队列中取出一帧长度
+     * 这里使用短临界区，保证队列头尾一致性。
+     */
+    uint16_t frame_len = 0U;
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
 
-        // 更新读指针
-        readIndex = (uint16_t)((readIndex + len) % BUFFER_SIZE);
+    if (rx_frame_q_count > 0U) {
+        frame_len = rx_frame_len_queue[rx_frame_q_head];
+        rx_frame_q_head = (uint8_t)((rx_frame_q_head + 1U) % RX_FRAME_QUEUE_SIZE);
+        rx_frame_q_count--;
+    }
+
+    if (primask == 0U) {
+        __enable_irq();
+    }
+
+    if (frame_len == 0U) {
+        return;
+    }
+
+    /* 按 frame_len 精确从 ring 中取出这一帧 */
+    uint16_t copy_len =
+        (uint16_t)(((uint32_t)readIndex + frame_len <= BUFFER_SIZE)
+                   ? frame_len
+                   : (BUFFER_SIZE - readIndex));
+
+    memcpy(frame, &rx_ring[readIndex], copy_len);
+
+    if (copy_len < frame_len) {
+        memcpy(frame + copy_len, rx_ring, frame_len - copy_len);
+    }
+
+    readIndex = (uint16_t)((readIndex + frame_len) % BUFFER_SIZE);
+    frame[frame_len] = '\0';
+
+    /* 当前仍按“整帧命令 / 整帧文本”分流 */
+    if (is_command_frame((const uint8_t *)frame, frame_len)) {
+        handle_escpos_command((uint8_t *)frame, frame_len);
+    } else {
+        handle_text_data((uint8_t *)frame, frame_len);
     }
 }
