@@ -66,8 +66,8 @@ all: main-build
 main-build: pos_u575_port.elf secondary-outputs
 
 # 工具调用
-pos_u575_port.elf pos_u575_port.map: $(OBJS) $(USER_OBJS) C:\NewFiles\STM32Printer1\STM32U575ZITXQ_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "pos_u575_port.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m33 -T"C:\NewFiles\STM32Printer1\STM32U575ZITXQ_FLASH.ld" --specs=nosys.specs -Wl,-Map="pos_u575_port.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+pos_u575_port.elf pos_u575_port.map: $(OBJS) $(USER_OBJS) C:\NewFiles\stm32test\STM32U575ZITXQ_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "pos_u575_port.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m33 -T"C:\NewFiles\stm32test\STM32U575ZITXQ_FLASH.ld" --specs=nosys.specs -Wl,-Map="pos_u575_port.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo '已结束构建目标： $@'
 	@echo ' '
 

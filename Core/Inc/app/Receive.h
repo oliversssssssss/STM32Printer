@@ -1,42 +1,48 @@
-#ifndef __RECEIVE_H__
-#define __RECEIVE_H__
+#ifndef INC_APP_RECEIVE_H_
+#define INC_APP_RECEIVE_H_
 
-#include "main.h"
-#include "stm32u5xx_hal.h"
+#include <stdint.h>
+#include <stdbool.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-/* =========================================================
- * Receive.h
+/*
+ * Receive 模块当前保留两条能力：
  *
- * 当前接收链对外暴露的正式接口只有两个：
+ * 1. 旧能力（legacy 主链）
+ *    - uart_rx_start()
+ *    - uart_GetDate()
+ *    这条链继续给旧的 step 打印使用
  *
- * 1. uart_rx_start()
- *    - 启动 UART1 ReceiveToIdle 接收链
- *    - 在系统初始化阶段调用一次
+ * 2. 新增能力（为后续 stream/parser 铺路）
+ *    - uart_rx_pop_chunk(...)
+ *    只负责从 ring + frame queue 中取出“原始 chunk”
+ *    不做命令/文本分流
  *
- * 2. uart_GetDate()
- *    - 任务侧消费已完整接收的一帧
- *    - 当前由 RxProcessTask 周期调用
- *
- * 说明：
- * - 当前主接收链已不再依赖旧的“单字节 HAL_UART_Receive_IT(..., 1)”模型
- * - 若工程中仍存在旧中断回调符号引用，对应兼容空壳定义在 Receive.c 中
- * ========================================================= */
+ * 当前阶段要求：
+ * - 绝不破坏旧的 uart_GetDate() 行为
+ * - 只是增加新接口，不替换旧主链
+ */
 
 void uart_rx_start(void);
+
+/* 旧主链：取一帧并直接做 legacy 命令/文本分流 */
 void uart_GetDate(void);
 
-/* 兼容保留：
- * 旧工程中若还有别处引用 rx_byte，则保留对外声明。
- * 当前方案 B 下，它已不再作为主接收路径核心变量。
+/*
+ * 新接口：从接收环形缓冲 + 帧长度队列中取出一个原始 chunk
+ *
+ * 参数：
+ *   buf      - 用户提供的输出缓冲
+ *   buf_size - 输出缓冲大小
+ *   out_len  - 实际取出的长度
+ *
+ * 返回：
+ *   true  - 成功取出一段原始 chunk
+ *   false - 当前没有可取数据，或参数非法
+ *
+ * 注意：
+ * - 该接口只“取原始块”，不负责命令/文本判断
+ * - 该接口当前不会被旧主链调用
  */
-extern uint8_t rx_byte;
+bool uart_rx_pop_chunk(uint8_t *buf, uint16_t buf_size, uint16_t *out_len);
 
-#ifdef __cplusplus
-}
-#endif
-
-#endif
+#endif /* INC_APP_RECEIVE_H_ */

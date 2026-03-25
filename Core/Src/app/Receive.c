@@ -39,6 +39,11 @@
  * 兼容说明：
  * - HAL_UART_RxCpltCallback(...) 仍保留空壳，以避免旧引用报错
  * - rx_byte 仍保留定义，以避免头文件依赖断裂
+ *
+ * Step4 最小增量修改：
+ * - 保留这份已验证能工作的旧实现
+ * - 只额外新增 uart_rx_pop_chunk(...)，给后续 stream/parser 铺路
+ * - 不改变 uart_GetDate() 的 legacy 行为
  * ========================================================= */
 
 /* ========================= 参数配置 ========================= */
@@ -104,7 +109,8 @@ static uint16_t ring_free_length(void)
     return (uint16_t)((BUFFER_SIZE - 1U) - ring_used_length());
 }
 
-/* 当前规则：
+/*
+ * 当前规则：
  * 1. ESC 开头 -> 命令帧
  * 2. demo 简化触发命令：仅严格接受 0A 00 / 0C 00
  *
@@ -174,6 +180,75 @@ static void uart_rx_restart_idle(void)
     }
 }
 
+/*
+ * Step4 新增：
+ * 从 frame_len_queue + ring 中取出一段完整原始 chunk
+ * 只负责“取块”，不做命令/文本判断
+ *
+ * 设计原则：
+ * - 保持和 uart_GetDate() 相同的取块逻辑
+ * - 不改变旧 legacy 行为
+ */
+static bool pop_one_raw_chunk(uint8_t *buf, uint16_t buf_size, uint16_t *out_len)
+{
+    uint16_t frame_len = 0U;
+    uint16_t copy_len = 0U;
+
+    if (buf == NULL || out_len == NULL || buf_size == 0U) {
+        return false;
+    }
+
+    *out_len = 0U;
+
+    /* 没有完整帧待处理 */
+    if (rx_frame_q_count == 0U) {
+        return false;
+    }
+
+    /* 从帧长度队列中取出一帧长度
+     * 这里使用短临界区，保证队列头尾一致性。
+     */
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+
+    if (rx_frame_q_count > 0U) {
+        frame_len = rx_frame_len_queue[rx_frame_q_head];
+        rx_frame_q_head = (uint8_t)((rx_frame_q_head + 1U) % RX_FRAME_QUEUE_SIZE);
+        rx_frame_q_count--;
+    }
+
+    if (primask == 0U) {
+        __enable_irq();
+    }
+
+    if (frame_len == 0U) {
+        return false;
+    }
+
+    /* 用户缓冲不够：为了不破坏后续状态，这里直接丢弃本帧 */
+    if (frame_len > buf_size) {
+        readIndex = (uint16_t)((readIndex + frame_len) % BUFFER_SIZE);
+        return false;
+    }
+
+    /* 按 frame_len 精确从 ring 中取出这一帧 */
+    copy_len =
+        (uint16_t)(((uint32_t)readIndex + frame_len <= BUFFER_SIZE)
+                   ? frame_len
+                   : (BUFFER_SIZE - readIndex));
+
+    memcpy(buf, &rx_ring[readIndex], copy_len);
+
+    if (copy_len < frame_len) {
+        memcpy(buf + copy_len, rx_ring, frame_len - copy_len);
+    }
+
+    readIndex = (uint16_t)((readIndex + frame_len) % BUFFER_SIZE);
+    *out_len = frame_len;
+
+    return true;
+}
+
 /* ========================= 对外接口 ========================= */
 
 void uart_rx_start(void)
@@ -202,9 +277,15 @@ void uart_rx_start(void)
     uart_rx_restart_idle();
 }
 
+bool uart_rx_pop_chunk(uint8_t *buf, uint16_t buf_size, uint16_t *out_len)
+{
+    return pop_one_raw_chunk(buf, buf_size, out_len);
+}
+
 /* ========================= HAL 回调 ========================= */
 
-/* 方案 B 主回调：
+/*
+ * 方案 B 主回调：
  * 一段数据接收完成，并且 UART 进入空闲时触发。
  *
  * ISR 只做最小工作：
@@ -251,7 +332,8 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
     }
 }
 
-/* 兼容保留：
+/*
+ * 兼容保留：
  * 当前方案 B 已不再使用单字节接收完成回调作为主路径。
  * 保留此空实现仅为了避免旧工程符号依赖报错。
  */
@@ -260,7 +342,8 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     (void)huart;
 }
 
-/* UART 错误回调：
+/*
+ * UART 错误回调：
  * - 记录错误
  * - 任务侧统一做可观测输出
  * - 尝试恢复接收链
@@ -280,7 +363,8 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 
 void uart_GetDate(void)
 {
-    static char frame[BUFFER_SIZE + 1U];
+    static uint8_t frame[BUFFER_SIZE + 1U];
+    uint16_t frame_len = 0U;
 
     /* 任务侧统一输出可观测错误 */
     if (uart_error_pending != 0U) {
@@ -302,45 +386,10 @@ void uart_GetDate(void)
                   (unsigned long)rx_frame_queue_overflow_count);
     }
 
-    /* 没有完整帧待处理，直接返回 */
-    if (rx_frame_q_count == 0U) {
+    if (!pop_one_raw_chunk(frame, sizeof(frame) - 1U, &frame_len)) {
         return;
     }
 
-    /* 从帧长度队列中取出一帧长度
-     * 这里使用短临界区，保证队列头尾一致性。
-     */
-    uint16_t frame_len = 0U;
-    uint32_t primask = __get_PRIMASK();
-    __disable_irq();
-
-    if (rx_frame_q_count > 0U) {
-        frame_len = rx_frame_len_queue[rx_frame_q_head];
-        rx_frame_q_head = (uint8_t)((rx_frame_q_head + 1U) % RX_FRAME_QUEUE_SIZE);
-        rx_frame_q_count--;
-    }
-
-    if (primask == 0U) {
-        __enable_irq();
-    }
-
-    if (frame_len == 0U) {
-        return;
-    }
-
-    /* 按 frame_len 精确从 ring 中取出这一帧 */
-    uint16_t copy_len =
-        (uint16_t)(((uint32_t)readIndex + frame_len <= BUFFER_SIZE)
-                   ? frame_len
-                   : (BUFFER_SIZE - readIndex));
-
-    memcpy(frame, &rx_ring[readIndex], copy_len);
-
-    if (copy_len < frame_len) {
-        memcpy(frame + copy_len, rx_ring, frame_len - copy_len);
-    }
-
-    readIndex = (uint16_t)((readIndex + frame_len) % BUFFER_SIZE);
     frame[frame_len] = '\0';
 
     /* 当前仍按“整帧命令 / 整帧文本”分流 */

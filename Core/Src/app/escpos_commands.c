@@ -9,9 +9,14 @@
  * 4. 在 RTOS 下把“打印请求”从轮询标志升级成真正的任务通知
  * 5. 给 settings 增加 RTOS mutex 保护，并补配置快照接口
  *
+ * 第二步目标：
+ * - 保持 legacy 命令与 legacy 打印链行为不变
+ * - 仅提取可复用的 settings helper
+ * - 不引入新 parser，不改旧打印入口
+ *
  * 说明：
  * - settings 仍然只由本文件拥有
- * - 外部仍然不能直接修改 settings
+ * - 外部仍然不能直接修改全局 settings
  * - 当前打印仍走 DEBUG 模式，方便 Python 端直观看字
  */
 
@@ -102,11 +107,7 @@ static void printer_clear_text_buffer(const char *reason)
 /* 内部无锁默认值恢复，只能在已持锁上下文中调用 */
 static void printer_settings_reset_default_unlocked(void)
 {
-    settings.line_spacing = 0U;
-    settings.margin_left  = 0U;
-    settings.margin_right = 0U;
-    settings.scale        = 1U;
-    settings.alignment    = 0U;
+    printer_settings_reset_struct(&settings);
 }
 
 static void printer_settings_reset_default(void)
@@ -125,7 +126,7 @@ static void printer_settings_set_alignment(uint8_t alignment)
         return;
     }
 
-    settings.alignment = alignment;
+    printer_settings_apply_alignment(&settings, alignment);
     settings_unlock();
 }
 
@@ -135,7 +136,7 @@ static void printer_settings_set_line_spacing(uint8_t line_spacing)
         return;
     }
 
-    settings.line_spacing = line_spacing;
+    printer_settings_apply_line_spacing(&settings, line_spacing);
     settings_unlock();
 }
 
@@ -145,7 +146,7 @@ static void printer_settings_set_margin_left(uint8_t margin_left)
         return;
     }
 
-    settings.margin_left = margin_left;
+    printer_settings_apply_margin_left(&settings, margin_left);
     settings_unlock();
 }
 
@@ -155,7 +156,7 @@ static void printer_settings_set_margin_right(uint8_t margin_right)
         return;
     }
 
-    settings.margin_right = margin_right;
+    printer_settings_apply_margin_right(&settings, margin_right);
     settings_unlock();
 }
 
@@ -165,14 +166,7 @@ static void printer_settings_set_scale(uint8_t scale)
         return;
     }
 
-    if (scale < 1U) {
-        scale = 1U;
-    }
-    if (scale > 3U) {
-        scale = 3U;
-    }
-
-    settings.scale = scale;
+    printer_settings_apply_scale(&settings, scale);
     settings_unlock();
 }
 
@@ -237,6 +231,77 @@ static uint8_t parse_alignment_value(uint8_t raw, uint8_t *out_val)
     }
 
     return 0U;
+}
+
+/* ========================= 对外 settings helper ========================= */
+
+void printer_settings_reset_struct(PrintSettings *s)
+{
+    if (s == NULL) {
+        return;
+    }
+
+    s->line_spacing = 0U;
+    s->margin_left  = 0U;
+    s->margin_right = 0U;
+    s->scale        = 1U;
+    s->alignment    = 0U;
+}
+
+void printer_settings_apply_alignment(PrintSettings *s, uint8_t n)
+{
+    if (s == NULL) {
+        return;
+    }
+
+    if (n > 2U) {
+        n = 0U;
+    }
+
+    s->alignment = n;
+}
+
+void printer_settings_apply_line_spacing(PrintSettings *s, uint8_t n)
+{
+    if (s == NULL) {
+        return;
+    }
+
+    s->line_spacing = n;
+}
+
+void printer_settings_apply_margin_left(PrintSettings *s, uint8_t n)
+{
+    if (s == NULL) {
+        return;
+    }
+
+    s->margin_left = n;
+}
+
+void printer_settings_apply_margin_right(PrintSettings *s, uint8_t n)
+{
+    if (s == NULL) {
+        return;
+    }
+
+    s->margin_right = n;
+}
+
+void printer_settings_apply_scale(PrintSettings *s, uint8_t n)
+{
+    if (s == NULL) {
+        return;
+    }
+
+    if (n < 1U) {
+        n = 1U;
+    }
+    if (n > 3U) {
+        n = 3U;
+    }
+
+    s->scale = n;
 }
 
 /* ========================= 对外接口 ========================= */
@@ -327,7 +392,6 @@ void printer_execute_buffer(void)
     }
     log_printf("\r\n");
 
-
     if (copied_len == 0U) {
         log_error("print_buffer is empty\r\n");
         return;
@@ -340,15 +404,8 @@ void printer_execute_buffer(void)
 
     log_info("Start printing the buffer...\r\n");
 
-    /* 恢复 SETTINGS 模式：
-     * - alignment
-     * - margin_left / margin_right
-     * - line_spacing
-     * - scale
-     * 都将真正参与打印
-     */
-//    dm_print_string_with_settings(g_print_snapshot, &settings_snapshot);
-
+    /* 当前 legacy 主链仍保持旧行为，不改变可运行基线 */
+    /* dm_print_string_with_settings(g_print_snapshot, &settings_snapshot); */
     dm_print_string_debug(g_print_snapshot);
 }
 
