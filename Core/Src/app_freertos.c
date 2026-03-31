@@ -119,9 +119,6 @@ void MX_FREERTOS_Init(void)
 
   log_bind_uart1_mutex(uart1LogMutexHandle);
 
-
-
-
   /* 新增：创建 print_buffer mutex */
   printBufferMutexHandle = osMutexNew(&printBufferMutex_attributes);
   if (printBufferMutexHandle == NULL)
@@ -139,7 +136,6 @@ void MX_FREERTOS_Init(void)
 
   printer_bind_settings_mutex(settingsMutexHandle);
 
-
   printRequestSemaphoreHandle = osSemaphoreNew(32, 0, &printRequestSemaphore_attributes);
   if (printRequestSemaphoreHandle == NULL)
   {
@@ -147,7 +143,6 @@ void MX_FREERTOS_Init(void)
   }
 
   printer_bind_print_semaphore(printRequestSemaphoreHandle);
-
 
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add other mutexes, ... */
@@ -205,7 +200,7 @@ static void StartRxProcessTask(void *argument)
   for(;;)
   {
     app_printer_process_rx();
-    osDelay(5);
+    osDelay(1);
   }
 }
 

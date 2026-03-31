@@ -39,13 +39,18 @@
  * 兼容说明：
  * - HAL_UART_RxCpltCallback(...) 仍保留空壳，以避免旧引用报错
  * - rx_byte 仍保留定义，以避免头文件依赖断裂
+ *
+ * 当前这一轮的额外目标：
+ * - 遇到 UART ORE/NE/FE/PE 后，显式清错误标志并 flush RX 数据，
+ *   再重启 ReceiveToIdle，避免错误状态残留导致持续丢字节。
  * ========================================================= */
 
 /* ========================= 参数配置 ========================= */
 
 #define BUFFER_SIZE              4096
-#define RX_IDLE_CHUNK_SIZE       128
-#define RX_FRAME_QUEUE_SIZE      16
+#define RX_IDLE_CHUNK_SIZE       256
+#define RX_FRAME_QUEUE_SIZE      64
+#define UART_GETDATE_MAX_FRAMES  8U
 
 /* ========================= 接收状态 ========================= */
 
@@ -145,23 +150,41 @@ static void handle_text_data(uint8_t *data, uint16_t len)
         return;
     }
 
-    log_info("识别到指令txt\r\n");
-
-    if (print_buffer_append_text(data, len)) {
-        log_info("TXT len=%d, total=%d, data=[%.*s]\r\n",
-                 len,
-                 print_buffer_get_length(),
-                 len,
-                 data);
-
-        log_printf("[TXT HEX] ");
-        for (uint16_t i = 0; i < len; i++) {
-            log_printf("%02X ", data[i]);
-        }
-        log_printf("\r\n");
-    } else {
-        log_error("缓冲区溢出，丢弃数据\r\n");
+    if (!print_buffer_append_text(data, len)) {
+        log_error("print_buffer append failed\r\n");
     }
+}
+
+/* 显式清 UART 错误并 flush RX 数据。
+ * 目的：
+ * - 处理 ORE / NE / FE / PE 后，不让错误状态残留
+ * - 丢掉当前已经损坏/半截的 RX 数据
+ * - 然后再重启 ReceiveToIdle
+ */
+static void uart_rx_clear_error_and_flush(UART_HandleTypeDef *huart)
+{
+    if (huart == NULL) {
+        return;
+    }
+
+    if (__HAL_UART_GET_FLAG(huart, UART_FLAG_ORE) != RESET) {
+        __HAL_UART_CLEAR_FLAG(huart, UART_CLEAR_OREF);
+    }
+
+    if (__HAL_UART_GET_FLAG(huart, UART_FLAG_NE) != RESET) {
+        __HAL_UART_CLEAR_FLAG(huart, UART_CLEAR_NEF);
+    }
+
+    if (__HAL_UART_GET_FLAG(huart, UART_FLAG_FE) != RESET) {
+        __HAL_UART_CLEAR_FLAG(huart, UART_CLEAR_FEF);
+    }
+
+    if (__HAL_UART_GET_FLAG(huart, UART_FLAG_PE) != RESET) {
+        __HAL_UART_CLEAR_FLAG(huart, UART_CLEAR_PEF);
+    }
+
+    /* 丢弃当前 FIFO / RDR 中可能残留的脏数据 */
+    __HAL_UART_SEND_REQ(huart, UART_RXDATA_FLUSH_REQUEST);
 }
 
 /* 重新启动下一轮 ReceiveToIdle */
@@ -199,6 +222,7 @@ void uart_rx_start(void)
     memset(rx_ring, 0, sizeof(rx_ring));
     memset(rx_idle_chunk, 0, sizeof(rx_idle_chunk));
 
+    uart_rx_clear_error_and_flush(&huart1);
     uart_rx_restart_idle();
 }
 
@@ -262,7 +286,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
 /* UART 错误回调：
  * - 记录错误
- * - 任务侧统一做可观测输出
+ * - 显式清错误标志并 flush RX 数据
  * - 尝试恢复接收链
  */
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
@@ -272,6 +296,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
         uart_error_code_last = huart->ErrorCode;
         uart_error_pending = 1U;
 
+        uart_rx_clear_error_and_flush(huart);
         uart_rx_restart_idle();
     }
 }
@@ -281,6 +306,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 void uart_GetDate(void)
 {
     static char frame[BUFFER_SIZE + 1U];
+    uint8_t processed_frames = 0U;
 
     /* 任务侧统一输出可观测错误 */
     if (uart_error_pending != 0U) {
@@ -302,51 +328,48 @@ void uart_GetDate(void)
                   (unsigned long)rx_frame_queue_overflow_count);
     }
 
-    /* 没有完整帧待处理，直接返回 */
-    if (rx_frame_q_count == 0U) {
-        return;
-    }
+    while (processed_frames < UART_GETDATE_MAX_FRAMES) {
+        uint16_t frame_len = 0U;
+        uint32_t primask = __get_PRIMASK();
 
-    /* 从帧长度队列中取出一帧长度
-     * 这里使用短临界区，保证队列头尾一致性。
-     */
-    uint16_t frame_len = 0U;
-    uint32_t primask = __get_PRIMASK();
-    __disable_irq();
+        __disable_irq();
 
-    if (rx_frame_q_count > 0U) {
-        frame_len = rx_frame_len_queue[rx_frame_q_head];
-        rx_frame_q_head = (uint8_t)((rx_frame_q_head + 1U) % RX_FRAME_QUEUE_SIZE);
-        rx_frame_q_count--;
-    }
+        if (rx_frame_q_count > 0U) {
+            frame_len = rx_frame_len_queue[rx_frame_q_head];
+            rx_frame_q_head = (uint8_t)((rx_frame_q_head + 1U) % RX_FRAME_QUEUE_SIZE);
+            rx_frame_q_count--;
+        }
 
-    if (primask == 0U) {
-        __enable_irq();
-    }
+        if (primask == 0U) {
+            __enable_irq();
+        }
 
-    if (frame_len == 0U) {
-        return;
-    }
+        if (frame_len == 0U) {
+            break;
+        }
 
-    /* 按 frame_len 精确从 ring 中取出这一帧 */
-    uint16_t copy_len =
-        (uint16_t)(((uint32_t)readIndex + frame_len <= BUFFER_SIZE)
-                   ? frame_len
-                   : (BUFFER_SIZE - readIndex));
+        /* 按 frame_len 精确从 ring 中取出这一帧 */
+        uint16_t copy_len =
+            (uint16_t)(((uint32_t)readIndex + frame_len <= BUFFER_SIZE)
+                       ? frame_len
+                       : (BUFFER_SIZE - readIndex));
 
-    memcpy(frame, &rx_ring[readIndex], copy_len);
+        memcpy(frame, &rx_ring[readIndex], copy_len);
 
-    if (copy_len < frame_len) {
-        memcpy(frame + copy_len, rx_ring, frame_len - copy_len);
-    }
+        if (copy_len < frame_len) {
+            memcpy(frame + copy_len, rx_ring, frame_len - copy_len);
+        }
 
-    readIndex = (uint16_t)((readIndex + frame_len) % BUFFER_SIZE);
-    frame[frame_len] = '\0';
+        readIndex = (uint16_t)((readIndex + frame_len) % BUFFER_SIZE);
+        frame[frame_len] = '\0';
 
-    /* 当前仍按“整帧命令 / 整帧文本”分流 */
-    if (is_command_frame((const uint8_t *)frame, frame_len)) {
-        handle_escpos_command((uint8_t *)frame, frame_len);
-    } else {
-        handle_text_data((uint8_t *)frame, frame_len);
+        /* 当前仍按“整帧命令 / 整帧文本”分流 */
+        if (is_command_frame((const uint8_t *)frame, frame_len)) {
+            handle_escpos_command((uint8_t *)frame, frame_len);
+        } else {
+            handle_text_data((uint8_t *)frame, frame_len);
+        }
+
+        processed_frames++;
     }
 }

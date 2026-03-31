@@ -1,4 +1,4 @@
 ../Core/Src/app_freertos.c:107:6:MX_FREERTOS_Init	8
-../Core/Src/app_freertos.c:194:6:StartDefaultTask	1
-../Core/Src/app_freertos.c:203:13:StartRxProcessTask	1
-../Core/Src/app_freertos.c:215:13:StartPrintTask	1
+../Core/Src/app_freertos.c:189:6:StartDefaultTask	1
+../Core/Src/app_freertos.c:198:13:StartRxProcessTask	1
+../Core/Src/app_freertos.c:210:13:StartPrintTask	1
