@@ -12,6 +12,8 @@
  * 当前这一轮的额外目标：
  * 6. 空打印请求收口，不再连续空转
  * 7. 继续保持命令层近乎静音
+ * 8. 真正让打印执行路径使用 settings 快照，
+ *    恢复 alignment / scale / margin / line_spacing 的实际生效
  */
 
 #include "escpos_commands.h"
@@ -288,10 +290,18 @@ void printer_execute_buffer(void)
         return;
     }
 
+    /* 复制当前样式快照。
+     * 即使复制失败，也保留上面初始化好的默认 settings_snapshot，
+     * 保证打印链仍可继续工作。
+     */
     (void)printer_copy_settings_snapshot(&settings_snapshot);
-    (void)settings_snapshot;
 
-    dm_print_string_debug(g_print_snapshot);
+    /* 关键修复：
+     * 之前这里走的是 dm_print_string_debug(...)，
+     * DEBUG 路径不会应用 alignment / scale / margin / line_spacing。
+     * 现在改为正式使用 settings 渲染路径。
+     */
+    dm_print_string_with_settings(g_print_snapshot, &settings_snapshot);
 }
 
 /* 兼容保留：旧轮询路径 */
